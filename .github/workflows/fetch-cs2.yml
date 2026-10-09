@@ -13,6 +13,13 @@ on:
     # 每 2 小时的第 23 分钟跑一次（错开整点，减少排队延迟）
     - cron: "23 */2 * * *"
   workflow_dispatch: # 也支持手动点一下立刻跑
+  push:
+    # 改了脚本或工作流本身时自动重跑，省得等下一个整点。
+    # 只匹配这两个文件：工作流自己提交的 data/cs2.json 和 logos/ 不在里面，
+    # 所以不会形成"提交->触发->再提交"的死循环。
+    paths:
+      - "fetch_cs2.py"
+      - ".github/workflows/fetch-cs2.yml"
 
 permissions:
   contents: write
