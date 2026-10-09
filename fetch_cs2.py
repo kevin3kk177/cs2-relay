@@ -114,6 +114,8 @@ def slim(raw: Dict[str, Any]) -> Dict[str, Any]:
                     "id": opponent.get("id"),
                     "name": opponent.get("name"),
                     "acronym": opponent.get("acronym"),
+                    # 队标地址：下一步会被 mirror_logos 换成仓库内的相对路径
+                    "image_url": opponent.get("image_url"),
                 }
             }
         )
@@ -140,6 +142,84 @@ def slim(raw: Dict[str, Any]) -> Dict[str, Any]:
         "serie": {"name": serie.get("name"), "full_name": serie.get("full_name"), "tier": serie.get("tier")},
         "league": {"name": league.get("name")},
     }
+
+
+# ----------------------------------------------------------------- 队标镜像
+# 为什么要镜像：机器人所在网络访问不了 cdn.pandascore.co（会被重置），
+# 但 GitHub Actions 能访问。所以让 Actions 把队标下载进仓库，
+# 机器人直接从 GitHub 取 —— 和赛程数据走同一条路。
+LOGO_DIR = Path("logos")
+_LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _logo_name(team_id: Any, url: str) -> str:
+    """确定性的文件名：同一个队永远同一个名字，避免仓库里堆重复文件。"""
+    ext = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if ext not in _LOGO_EXTS:
+        ext = ".png"
+    safe = str(team_id).replace("/", "_").replace("\\", "_")
+    return f"{safe}{ext}"
+
+
+def download(url: str, retries: int = 3) -> bytes | None:
+    """下载一个文件，失败返回 None（队标缺失不该让整次取数失败）。"""
+    request = urllib.request.Request(url, headers={"User-Agent": "cs2-relay/1.0"})
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.read()
+        except Exception as exc:  # noqa: BLE001 - 网络问题一律重试
+            if attempt >= retries:
+                print(f"    [!] 下载失败 {url}：{exc}")
+                return None
+            time.sleep(min(2 ** (attempt - 1), 4))
+    return None
+
+
+def mirror_logos(groups: List[List[Dict[str, Any]]]) -> None:
+    """把出现过的战队队标下载到 logos/，并把 JSON 里的 image_url 换成仓库相对路径。
+
+    已经存在的文件会跳过，所以日常只会有「新战队」的少量新增，仓库不会一直膨胀。
+    """
+    LOGO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 收集所有引用到的队标（按 team_id 去重）
+    wanted: Dict[Any, str] = {}
+    for items in groups:
+        for item in items:
+            for entry in item.get("opponents") or []:
+                opponent = entry.get("opponent") or {}
+                url = opponent.get("image_url")
+                team_id = opponent.get("id")
+                if url and team_id is not None:
+                    wanted[team_id] = url
+
+    downloaded = skipped = failed = 0
+    for team_id, url in sorted(wanted.items(), key=lambda kv: str(kv[0])):
+        name = _logo_name(team_id, url)
+        target = LOGO_DIR / name
+        if not target.exists():
+            data = download(url)
+            if data and len(data) > 100:
+                target.write_bytes(data)
+                downloaded += 1
+            else:
+                failed += 1
+        else:
+            skipped += 1
+
+        # 不管下载成功与否，都把路径写进 JSON：机器人取不到时会退化成字母占位图
+        relative = f"{LOGO_DIR.as_posix()}/{name}"
+        for items in groups:
+            for item in items:
+                for entry in item.get("opponents") or []:
+                    opponent = entry.get("opponent") or {}
+                    if opponent.get("id") == team_id:
+                        opponent["logo"] = relative
+                        opponent.pop("image_url", None)
+
+    print(f"  [*] 队标：新下载 {downloaded} 个 / 已存在 {skipped} 个 / 失败 {failed} 个")
+
 
 
 def clean(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -209,6 +289,9 @@ def main() -> int:
     if result["counts"]["upcoming"] == 0 and result["counts"]["past"] == 0:
         print("[x] 一场比赛都没取到，判定为异常，不覆盖已有数据。请检查 token 是否有效。")
         return 1
+
+    print("[*] 镜像战队队标...")
+    mirror_logos([result["running"], result["upcoming"], result["past"]])
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(
