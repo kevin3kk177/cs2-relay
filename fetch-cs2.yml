@@ -1,0 +1,46 @@
+name: Fetch CS2 data
+
+# 定时把 PandaScore 的赛程/赛果取回来，提交进这个仓库。
+# 机器人再从 api.github.com 读 data/cs2.json —— 所以它不需要能访问 PandaScore。
+#
+# 注意：GitHub 的定时任务在高峰期可能延迟几分钟到几十分钟，这对「每天播报一次」
+# 完全够用；如果你发现数据太旧，把间隔改成每小时（*/1）即可。
+# 另外 GitHub 会在仓库连续 60 天没有任何活动后暂停定时任务 ——
+# 本工作流每次有数据变化都会提交，所以仓库一直有活动，不会被暂停。
+
+on:
+  schedule:
+    # 每 2 小时的第 23 分钟跑一次（错开整点，减少排队延迟）
+    - cron: "23 */2 * * *"
+  workflow_dispatch: # 也支持手动点一下立刻跑
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-cs2
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取数
+        env:
+          PANDASCORE_TOKEN: ${{ secrets.PANDASCORE_TOKEN }}
+        run: python3 fetch_cs2.py
+
+      - name: 有变化才提交
+        run: |
+          git config user.name  "cs2-relay-bot"
+          git config user.email "cs2-relay-bot@users.noreply.github.com"
+          git add data/cs2.json
+          if git diff --cached --quiet; then
+            echo "数据没有变化，跳过提交"
+          else
+            git commit -m "chore: 更新 CS2 赛程数据"
+            git push
+          fi
